@@ -1,9 +1,18 @@
+# src/app/config.py
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+# تغییر ۱: اضافه کردن لودر برای فایل .env
+# این خط باعث می‌شود اگر فایلی به نام .env داشته باشید، خودکار خوانده شود.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # اگر پکیج نصب نبود، خطا ندهد (شاید در محیط پروداکشن واقعی هستیم)
 
 
 def _env_str(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -54,12 +63,12 @@ class Settings:
     # Importer / privacy
     respondent_id_salt: str
 
-    # Sandbox / execution safety (used by executor later)
+    # Sandbox / execution safety
     sandbox_timeout_seconds: int
     max_code_iterations: int
     max_quality_iterations: int
 
-    # LLM model names (placeholders; used by llm_factory later)
+    # LLM model names
     router_model: str
     mapper_model: str
     planner_model: str
@@ -71,14 +80,13 @@ class Settings:
 
     @staticmethod
     def from_env() -> "Settings":
-        # Read configuration from environment variables.
-        # Keep defaults safe and local-friendly.
         db_path = _env_str("APP_DB_PATH", "data/app.db")
         artifacts_dir = _env_str("APP_ARTIFACTS_DIR", "artifacts")
 
-        # Create directories if needed (do not create DB file here).
-        Path(artifacts_dir).mkdir(parents=True, exist_ok=True)
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        # Create directories if needed
+        # تغییر ریز: استفاده از resolve() برای اطمینان از مسیر مطلق
+        Path(artifacts_dir).resolve().mkdir(parents=True, exist_ok=True)
+        Path(db_path).resolve().parent.mkdir(parents=True, exist_ok=True)
 
         return Settings(
             db_path=db_path,

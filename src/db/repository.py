@@ -1,4 +1,3 @@
-# repository.py
 from __future__ import annotations
 
 import json
@@ -14,24 +13,34 @@ from .models import Questionnaire, QuestionDef, AnalysisRun
 
 
 def _now_iso_sqlite() -> str:
-    # SQLite will fill defaults, but sometimes we want explicit values.
     import datetime as _dt
     return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
 def hash_respondent_id(raw_id: str, salt: str) -> str:
-    # Hash respondent IDs to avoid storing direct identifiers.
     h = hashlib.sha256()
     h.update((salt + "::" + raw_id).encode("utf-8"))
     return h.hexdigest()
 
 
 class SQLiteRepository:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, schema_sql_path: Optional[str] = None):
         self.db_path = db_path
+        if schema_sql_path:
+             self.init_schema_from_sql_file(schema_sql_path)
+
+    def init_schema_from_sql_file(self, schema_path: str) -> None:
+        try:
+            with open(schema_path, "r", encoding="utf-8") as f:
+                sql = f.read()
+            conn = connect(self.db_path)
+            conn.executescript(sql)
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
 
     def init_schema_from_sql(self, schema_sql: str) -> None:
-        # Execute schema SQL in a single transaction.
         conn = connect(self.db_path)
         try:
             conn.executescript(schema_sql)
@@ -135,7 +144,10 @@ class SQLiteRepository:
             conn.close()
 
     def resolve_question_ids(self, questionnaire_id: str, column_names: Sequence[str]) -> Dict[str, str]:
-        # Map column_name -> question_id
+        """
+        Map column_name -> question_id
+        این همان متدی است که خطا می‌داد (وجود نداشت)
+        """
         if not column_names:
             return {}
 
@@ -165,7 +177,6 @@ class SQLiteRepository:
         respondent_id_hash: Optional[str] = None,
         submitted_at: Optional[str] = None,
     ) -> str:
-        # Insert response header + values. Values are stored with a best-effort type mapping.
         response_id = str(uuid4())
         submitted_at = submitted_at or _now_iso_sqlite()
 
@@ -179,14 +190,12 @@ class SQLiteRepository:
                 (response_id, questionnaire_id, submitted_at, respondent_id_hash),
             )
 
-            # Resolve question IDs
             col_names = list(answers_by_column.keys())
             mapping = self.resolve_question_ids(questionnaire_id, col_names)
 
             for col, val in answers_by_column.items():
                 question_id = mapping.get(col)
                 if question_id is None:
-                    # Unknown question column_name -> skip (or raise, depending on your policy)
                     continue
 
                 value_id = str(uuid4())
@@ -215,31 +224,102 @@ class SQLiteRepository:
             conn.close()
 
     def _serialize_value(self, val: Any) -> Tuple[str, Optional[str], Optional[float], Optional[str], Optional[str]]:
-        # Returns: (value_type, value_text, value_num, value_date, value_json)
         if val is None:
             return ("text", None, None, None, None)
 
-        # Numeric
         if isinstance(val, (int, float)) and not isinstance(val, bool):
             return ("numeric", None, float(val), None, None)
 
-        # Date/datetime represented as ISO-like strings (you can strengthen this later)
         if isinstance(val, str):
             s = val.strip()
-            # Simple heuristic: if looks like YYYY-MM-DD or YYYY-MM-DDTHH:MM
             if len(s) >= 10 and s[4:5] == "-" and s[7:8] == "-":
                 return ("date", None, None, s, None)
             return ("text", s, None, None, None)
 
-        # Dict/list -> JSON
         if isinstance(val, (dict, list)):
             return ("json", None, None, None, json.dumps(val, ensure_ascii=False))
 
-        # Fallback: stringify
         return ("text", str(val), None, None, None)
 
     # -------------------------
-    # Fetch for analysis (long + wide)
+    # Batch / Bulk Operations (NEW)
+    # -------------------------
+    def clear_responses(self, questionnaire_id: str) -> None:
+        conn = connect(self.db_path)
+        try:
+            conn.execute("DELETE FROM responses WHERE questionnaire_id = ?", (questionnaire_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def insert_responses_batch(
+        self,
+        questionnaire_id: str,
+        rows_data: List[Dict[str, Any]],
+        respondent_id_salt: str
+    ) -> int:
+        col_names = set()
+        for r in rows_data:
+            col_names.update(r.keys())
+        
+        meta_cols = {"respondent_id", "submitted_at"}
+        question_cols = [c for c in col_names if c not in meta_cols]
+        
+        qmap = self.resolve_question_ids(questionnaire_id, list(question_cols))
+        
+        responses_tuples = []
+        values_tuples = []
+        default_submitted_at = _now_iso_sqlite()
+
+        for row in rows_data:
+            response_id = str(uuid4())
+            raw_resp_id = row.get("respondent_id")
+            respondent_hash = hash_respondent_id(str(raw_resp_id), respondent_id_salt) if raw_resp_id else None
+            submitted_at = str(row.get("submitted_at", default_submitted_at))
+            
+            responses_tuples.append((response_id, questionnaire_id, submitted_at, respondent_hash))
+
+            for col, raw_val in row.items():
+                if col in meta_cols:
+                    continue
+                
+                qid = qmap.get(col)
+                if not qid:
+                    continue
+
+                res = self._serialize_value(raw_val)
+                # اگر نوع داده text است و مقدار نال است، ذخیره نکن
+                if res[0] == "text" and res[1] is None:
+                     continue
+
+                value_id = str(uuid4())
+                values_tuples.append(
+                    (value_id, response_id, qid, *res)
+                )
+
+        conn = connect(self.db_path)
+        try:
+            conn.executemany(
+                "INSERT INTO responses(response_id, questionnaire_id, submitted_at, respondent_id) VALUES (?, ?, ?, ?)",
+                responses_tuples
+            )
+            conn.executemany(
+                """
+                INSERT INTO response_values(
+                  value_id, response_id, question_id,
+                  value_type, value_text, value_num, value_date, value_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values_tuples
+            )
+            conn.commit()
+            return len(responses_tuples)
+        finally:
+            conn.close()
+
+    # -------------------------
+    # Fetch for analysis
     # -------------------------
     def fetch_long_dataframe(
         self,
@@ -248,7 +328,6 @@ class SQLiteRepository:
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
     ) -> pd.DataFrame:
-        # Returns long format: one row per (response_id, column_name)
         mapping = self.resolve_question_ids(questionnaire_id, column_names)
         question_ids = [mapping[c] for c in column_names if c in mapping]
         if not question_ids:
@@ -321,7 +400,6 @@ class SQLiteRepository:
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
     ) -> pd.DataFrame:
-        # Wide format via pivot in pandas (safer than dynamic SQL pivot).
         long_df = self.fetch_long_dataframe(
             questionnaire_id=questionnaire_id,
             column_names=column_names,
@@ -338,7 +416,6 @@ class SQLiteRepository:
             aggfunc="first",
         ).reset_index()
 
-        # Make columns flat
         wide.columns.name = None
         return wide
 
@@ -380,7 +457,6 @@ class SQLiteRepository:
             conn.close()
 
     def patch_analysis_run(self, run_id: str, **fields: Any) -> None:
-        # Update any subset of columns safely.
         allowed = {
             "questionnaire_id",
             "user_question",

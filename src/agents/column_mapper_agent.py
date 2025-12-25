@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .base import BaseAgent
-from db.repository import SQLiteRepository  # Fix: import from top-level package (db), not src.db
+from src.db.repository import SQLiteRepository
 
 
 class ColumnMapperAgent(BaseAgent):
