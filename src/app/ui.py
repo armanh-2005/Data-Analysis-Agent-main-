@@ -1,6 +1,7 @@
 import sys
 import os
-
+from uuid import uuid4
+from langchain_openai import ChatOpenAI
 # اضافه کردن مسیر اصلی پروژه به Path برای ایمپورت صحیح ماژول‌ها
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 

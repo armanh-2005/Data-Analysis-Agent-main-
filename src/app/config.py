@@ -8,6 +8,7 @@ from typing import Optional
 
 # تغییر ۱: اضافه کردن لودر برای فایل .env
 # این خط باعث می‌شود اگر فایلی به نام .env داشته باشید، خودکار خوانده شود.
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -16,11 +17,7 @@ except ImportError:
 
 
 def _env_str(key: str, default: Optional[str] = None) -> Optional[str]:
-    v = os.getenv(key)
-    if v is None:
-        return default
-    v = v.strip()
-    return v if v else default
+    return os.getenv(key, default)
 
 
 def _env_int(key: str, default: int) -> int:
@@ -101,12 +98,12 @@ class Settings:
             max_code_iterations=_env_int("APP_MAX_CODE_ITERATIONS", 5),
             max_quality_iterations=_env_int("APP_MAX_QUALITY_ITERATIONS", 3),
 
-            router_model=_env_str("APP_MODEL_ROUTER", "gpt-4.1-mini") or "gpt-4.1-mini",
-            mapper_model=_env_str("APP_MODEL_MAPPER", "gpt-4.1-mini") or "gpt-4.1-mini",
-            planner_model=_env_str("APP_MODEL_PLANNER", "gpt-4.1") or "gpt-4.1",
-            stats_params_model=_env_str("APP_MODEL_STATS_PARAMS", "gpt-4.1") or "gpt-4.1",
-            code_writer_model=_env_str("APP_MODEL_CODE_WRITER", "gpt-4.1") or "gpt-4.1",
-            code_reviewer_model=_env_str("APP_MODEL_CODE_REVIEWER", "gpt-4.1") or "gpt-4.1",
-            quality_review_model=_env_str("APP_MODEL_QUALITY_REVIEW", "gpt-4.1") or "gpt-4.1",
-            report_writer_model=_env_str("APP_MODEL_REPORT_WRITER", "gpt-4.1") or "gpt-4.1",
+            router_model=_env_str("APP_MODEL_ROUTER", "glm-4.6") or "gpt-4.1-mini",
+            mapper_model=_env_str("APP_MODEL_MAPPER", "glm-4.6") or "gpt-4.1-mini",
+            planner_model=_env_str("APP_MODEL_PLANNER", "glm-4.6") or "gpt-4.1",
+            stats_params_model=_env_str("APP_MODEL_STATS_PARAMS", "glm-4.6") or "gpt-4.1",
+            code_writer_model=_env_str("APP_MODEL_CODE_WRITER", "glm-4.6") or "gpt-4.1",
+            code_reviewer_model=_env_str("APP_MODEL_CODE_REVIEWER", "glm-4.6") or "gpt-4.1",
+            quality_review_model=_env_str("APP_MODEL_QUALITY_REVIEW", "glm-4.6") or "gpt-4.1",
+            report_writer_model=_env_str("APP_MODEL_REPORT_WRITER", "glm-4.6") or "gpt-4.1",
         )
