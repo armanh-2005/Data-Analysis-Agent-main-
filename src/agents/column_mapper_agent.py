@@ -61,13 +61,14 @@ Schema:
 {{schema}}
 """.strip()
 
-    def __init__(self, llm, db_path: str, prompts_dir: Optional[str] = None):
+    def __init__(self, model: str = "glm-4.6", db_path: str = "data/app.db", prompts_dir: Optional[str] = None):
         # Resolve prompts_dir robustly (relative to this file) if not provided.
         if prompts_dir is None:
             prompts_dir = str(Path(__file__).resolve().parents[1] / "prompts")
-        super().__init__(llm=llm, prompts_dir=prompts_dir)
+        
+        # ارسال پارامتر model به کلاس پایه
+        super().__init__(model=model, prompts_dir=prompts_dir)
         self.repo = SQLiteRepository(db_path)
-
     def _build_variables(self, state: Any) -> Dict[str, Any]:
         # The mapper needs a questionnaire_id to load schema
         notes = getattr(state, "notes", {}) or {}

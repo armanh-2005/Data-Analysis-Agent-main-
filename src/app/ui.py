@@ -2,6 +2,13 @@ import sys
 import os
 from uuid import uuid4
 from langchain_openai import ChatOpenAI
+import os
+from dotenv import load_dotenv
+from pathlib import Path
+
+# پیدا کردن مسیر ریشه پروژه و بارگذاری .env
+root_dir = Path(__file__).resolve().parents[2]
+load_dotenv(root_dir / ".env")
 # اضافه کردن مسیر اصلی پروژه به Path برای ایمپورت صحیح ماژول‌ها
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 

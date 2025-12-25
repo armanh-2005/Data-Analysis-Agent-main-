@@ -127,7 +127,9 @@ class BaseAgent:
         # بارگذاری مجدد دات‌انو در اینجا برای اطمینان
         from dotenv import load_dotenv
         import os
-        load_dotenv()
+        from pathlib import Path
+        root_dir = Path(__file__).resolve().parents[2]
+        load_dotenv(root_dir / ".env")
 
         self.model_name = model
         self.prompts_dir = Path(prompts_dir)
