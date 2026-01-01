@@ -2,9 +2,18 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+from pathlib import Path
+from typing import Any, List, Tuple
 
-from .base import BaseAgent
+from langchain_core.messages import HumanMessage
+
+from src.agents.utils import (
+    get_llm,
+    render_prompt,
+    parse_json_object,
+    validate_with_jsonschema,
+    PromptNotFound
+)
 
 
 def _static_safety_scan(code: str) -> Tuple[bool, List[str]]:
@@ -24,7 +33,7 @@ def _static_safety_scan(code: str) -> Tuple[bool, List[str]]:
         r"\bfrom\s+sys\b",
         r"\beval\s*\(",
         r"\bexec\s*\(",
-        r"\bopen\s*\(",  # file IO should be controlled; executor can provide safe APIs later
+        r"\bopen\s*\(",
         r"\b__import__\b",
     ]
     issues: List[str] = []
@@ -34,9 +43,10 @@ def _static_safety_scan(code: str) -> Tuple[bool, List[str]]:
     return (len(issues) == 0), issues
 
 
-class CodeReviewerAgent(BaseAgent):
+class CodeReviewerAgent:
     name = "code_reviewer_agent"
     prompt_file = "code_reviewer.md"
+    
     output_schema = {
         "type": "object",
         "properties": {
@@ -56,58 +66,65 @@ class CodeReviewerAgent(BaseAgent):
         "additionalProperties": True,
     }
 
-    default_prompt = """
-You are a strict code reviewer for data analysis code.
-Return ONLY JSON:
-{
-  "code_review": {
-    "approved": true/false,
-    "feedback": "actionable feedback",
-    "issues": [{"type":"...","detail":"..."}],
-    "score": 0.0
-  }
-}
+    def __init__(self, model: str, prompts_dir: str = "src/prompts"):
+        self.llm = get_llm(model)
+        self.prompts_dir = Path(prompts_dir)
 
-Analysis plan:
-{{analysis_plan}}
+    def run(self, state: Any) -> Any:
+        """
+        Executes the code review logic:
+        1. Performs a static safety scan (regex-based).
+        2. If unsafe, returns rejection immediately.
+        3. If safe, calls LLM for logic/stats review.
+        4. Updates state with 'code_review'.
+        """
+        code_draft = getattr(state, "code_draft", "") or ""
 
-Stats params:
-{{stats_params}}
+        # 1. Static Safety Scan
+        is_safe, issues = _static_safety_scan(code_draft)
+        
+        if not is_safe:
+            # Immediate rejection without LLM
+            review_payload = {
+                "approved": False,
+                "feedback": "Static safety scan failed. Remove forbidden imports/calls.",
+                "issues": [{"type": "safety", "detail": x} for x in issues],
+                "score": 0.0,
+            }
+            return self._update_state(state, review_payload)
 
-Code:
-{{code_draft}}
-""".strip()
-
-    def invoke(self, state: Any):
-        # First run deterministic scan; reject immediately if unsafe.
-        code = getattr(state, "code_draft", "") or ""
-        ok, issues = _static_safety_scan(code)
-        if not ok:
-            return super()._to_patch(
-                {
-                    "code_review": {
-                        "approved": False,
-                        "feedback": "Static safety scan failed. Remove forbidden imports/calls.",
-                        "issues": [{"type": "safety", "detail": x} for x in issues],
-                        "score": 0.0,
-                    }
-                },
-                state,
-            )  # type: ignore[return-value]
-
-        # If LLM is available, use it for deeper review; otherwise approve by default.
-        if self.llm is None:
-            return {"code_review": {"approved": True, "feedback": "Approved by static scan (no LLM review).", "score": 0.7}}
-
-        resp = super().invoke(state)
-        return resp.patch
-
-    def _build_variables(self, state: Any) -> Dict[str, Any]:
-        return {
+        # 2. Prepare Inputs for LLM
+        variables = {
             "analysis_plan": getattr(state, "analysis_plan", {}) or {},
             "stats_params": getattr(state, "stats_params", {}) or {},
-            "code_draft": getattr(state, "code_draft", "") or "",
+            "code_draft": code_draft,
         }
 
-    def _to_patch(self, payload: Dict[str, Any], state: Any) -> Dict[str, Any]:
-        return {"code_review": payload.get("code_review", {}) or {}}
+        # 3. Render Prompt
+        prompt_path = self.prompts_dir / self.prompt_file
+        if not prompt_path.exists():
+            raise PromptNotFound(f"Prompt file not found: {prompt_path}")
+
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+        rendered_prompt = render_prompt(prompt_text, variables)
+
+        # 4. Call LLM
+        messages = [HumanMessage(content=rendered_prompt)]
+        response = self.llm.invoke(messages)
+
+        # 5. Parse & Validate
+        payload = parse_json_object(response.content)
+        validate_with_jsonschema(payload, self.output_schema)
+        
+        code_review = payload.get("code_review", {})
+        
+        # 6. Update State
+        return self._update_state(state, code_review)
+
+    def _update_state(self, state: Any, review: dict) -> Any:
+        """Helper to update state safely."""
+        if hasattr(state, "patch"):
+            return state.patch(code_review=review)
+        else:
+            state["code_review"] = review
+            return state
