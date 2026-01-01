@@ -17,6 +17,8 @@ dependencies = [
   "statsmodels>=0.14",
   "matplotlib>=3.7",
   "jsonschema>=4.19",
+  "scikit-learn>=1.3.0",  # <--- Added
+  "seaborn>=0.13.0",      # <--- Added
 ]
 
 [project.optional-dependencies]

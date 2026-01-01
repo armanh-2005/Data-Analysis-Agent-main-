@@ -53,7 +53,7 @@ def get_llm(model_name: str, temperature: float = 0.0):
     load_dotenv()
 
     api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.avalai.ir/v1")
+    base_url = "https://api.avalai.ir/v1"
 
     if not ChatOpenAI:
         raise ImportError("langchain_openai is not installed. Please install it to use the agents.")

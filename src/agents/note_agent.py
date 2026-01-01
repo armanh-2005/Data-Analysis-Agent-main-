@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from db.repository import SQLiteRepository
+# --- FIX: Change 'from db.repository' to 'from src.db.repository' ---
+from src.db.repository import SQLiteRepository  
 
 
 class NoteAgentError(Exception):
