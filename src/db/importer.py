@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, Tuple
 from uuid import UUID, uuid4, uuid5
@@ -9,10 +10,11 @@ from uuid import UUID, uuid4, uuid5
 import pandas as pd
 
 from .connection import connect
-from .repository import SQLiteRepository, hash_respondent_id
+from .repository import SQLiteRepository
 from .models import Questionnaire, QuestionDef
 from src.app.errors import ImporterError
 
+logger = logging.getLogger(__name__)
 
 _UUID_NAMESPACE = UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")  # stable namespace
 
@@ -48,10 +50,37 @@ class QuestionnaireImporter:
         questionnaire_id: Optional[str] = None,
         encoding: Optional[str] = None,
     ) -> ImportResult:
+        """
+        Reads a CSV file with robust separator detection to avoid single-column errors.
+        """
+        df = None
+        
+        # 1. Try python engine with auto detection (smartest but slower)
         try:
-            df = pd.read_csv(file_path, encoding=encoding)
-        except Exception as e:
-            raise ImporterError(f"Failed to read CSV: {e}") from e
+            df = pd.read_csv(file_path, sep=None, engine='python', encoding=encoding)
+            if len(df.columns) <= 1:
+                df = None # Try others if only 1 column detected
+        except Exception:
+            pass
+
+        # 2. If failed, try explicit common separators
+        if df is None:
+            separators = [',', ';', '\t', '|']
+            for sep in separators:
+                try:
+                    temp_df = pd.read_csv(file_path, sep=sep, encoding=encoding)
+                    if len(temp_df.columns) > 1:
+                        df = temp_df
+                        break
+                except Exception:
+                    continue
+
+        # 3. Fallback to default (comma) if all else fails
+        if df is None:
+            try:
+                df = pd.read_csv(file_path, encoding=encoding)
+            except Exception as e:
+                raise ImporterError(f"Failed to read CSV: {e}") from e
 
         return self._import_dataframe(
             df=df,
@@ -70,7 +99,9 @@ class QuestionnaireImporter:
         questionnaire_id: Optional[str] = None,
     ) -> ImportResult:
         try:
-            df = pd.read_excel(file_path, sheet_name=sheet_name)
+            # تغییر مهم: اگر نام شیت داده نشده، شیت اول (0) را بخوان تا DataFrame برگردد نه دیکشنری
+            target_sheet = sheet_name if sheet_name is not None else 0
+            df = pd.read_excel(file_path, sheet_name=target_sheet)
         except Exception as e:
             raise ImporterError(f"Failed to read Excel: {e}") from e
 

@@ -1,6 +1,4 @@
-# src/agents/router_mapper_agent.py
 from __future__ import annotations
-
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -57,9 +55,13 @@ class RouterMapperAgent:
         """
         # 1. Prepare Inputs
         user_question = getattr(state, "user_question", "")
-        # Access notes/questionnaire_id safely
+        
+        # FIX: Check state.questionnaire_id first (new state structure), then fallback to notes
+        questionnaire_id = getattr(state, "questionnaire_id", None)
         notes = getattr(state, "notes", {}) or {}
-        questionnaire_id = notes.get("questionnaire_id")
+        
+        if not questionnaire_id:
+            questionnaire_id = notes.get("questionnaire_id")
         
         # Load schema if we have a questionnaire ID
         schema_list: List[Dict[str, Any]] = []
