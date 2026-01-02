@@ -46,7 +46,14 @@ except ImportError as e:
 
 # --- تنظیمات اولیه ---
 st.set_page_config(page_title="دستیار تحلیل داده", page_icon="📊", layout="wide")
-st.markdown("""<style>.stTextInput, .stMarkdown, .stButton { direction: rtl; text-align: right; }</style>""", unsafe_allow_html=True)
+st.markdown("""
+<style>
+    .stTextInput, .stMarkdown, .stButton { direction: rtl; text-align: right; }
+    .stCode { direction: ltr; }
+    div[data-testid="stStatus"] { direction: rtl; }
+    .stTabs [data-baseweb="tab-list"] { justify-content: flex-end; }
+</style>
+""", unsafe_allow_html=True)
 
 @st.cache_resource
 def get_settings():
@@ -57,68 +64,82 @@ os.makedirs(os.path.dirname(settings.db_path), exist_ok=True)
 if hasattr(settings, 'artifacts_dir'):
     os.makedirs(settings.artifacts_dir, exist_ok=True)
 
-# --- تابع بررسی دیتابیس (اصلاح شده) ---
+# --- تابع بررسی دیتابیس (کانتر ستون و ردیف) ---
 def debug_database_schema(db_path, q_id):
     """بررسی می‌کند آیا واقعاً ستون‌ها در دیتابیس ذخیره شده‌اند؟"""
     try:
         with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
-            # FIX: نام جدول صحیح questionnaire_schema است
+            # تعداد ستون‌ها (سوالات)
             cursor.execute("SELECT count(*) FROM questionnaire_schema WHERE questionnaire_id = ?", (q_id,))
             q_count = cursor.fetchone()[0]
             
-            # FIX: بررسی جدول پاسخ‌ها
+            # تعداد ردیف‌ها (پاسخ‌دهندگان)
             cursor.execute("SELECT count(*) FROM responses WHERE questionnaire_id = ?", (q_id,))
             r_count = cursor.fetchone()[0]
             
             return q_count, r_count
     except Exception as e:
-        return -1, -1
+        return 0, 0
 
-# --- Executor (Jupyter-Style with Resilience) ---
+# --- Executor ---
+# در فایل src/app/ui2.py
+
 def execute_generated_code(code: str, db_path: str, artifacts_dir: str, questionnaire_id: str = None) -> Dict[str, Any]:
-    """
-    اجرای کد به صورت سلولی (با جداکننده # %%).
-    اگر یک سلول خطا دهد، سلول‌های بعدی همچنان تلاش می‌کنند اجرا شوند (Partial Success).
-    """
     if not os.path.exists(artifacts_dir):
         os.makedirs(artifacts_dir)
 
-    # تابع کمکی برای بارگذاری داده بدون نیاز به دادن ID توسط ایجنت
+    # 1. تابع کمکی برای دریافت دیتا از دیتابیس
     def _fetch_helper(qid=None):
         target_id = qid or questionnaire_id
         if not target_id:
             raise ValueError("Questionnaire ID not found in environment.")
-        return SQLiteRepository(db_path).fetch_wide_dataframe(target_id)
+        # استفاده از کلاس Repository برای فچ کردن دیتا
+        repo = SQLiteRepository(db_path)
+        return repo.fetch_wide_dataframe(target_id)
 
-    # محیط ایزوله (Local Scope)
+    # 2. لود کردن دیتافریم همین‌جا (قبل از اجرا)
+    # این کار باعث می‌شود df همیشه وجود داشته باشد، حتی اگر ایجنت فراموش کند آن را لود کند
+    try:
+        preloaded_df = _fetch_helper(questionnaire_id)
+        print(f"DEBUG: Dataframe loaded successfully with shape: {preloaded_df.shape}")
+    except Exception as e:
+        print(f"DEBUG: Failed to preload dataframe: {e}")
+        preloaded_df = pd.DataFrame() # یک دیتافریم خالی می‌سازیم که ارور ندهد
+
+    # 3. ساخت محیط اجرا (Local Scope)
     local_scope = {
+        # کتابخانه‌های استاندارد
         "pd": pd, "np": np, "sqlite3": sqlite3, "plt": plt, "json": json, "os": os,
         "political": political, "stats": stats, "viz": viz,
         "is_dataclass": is_dataclass, "asdict": asdict,
-        # تزریق توابع و متغیرهای حیاتی
+        
+        # توابع کمکی
         "fetch_wide_dataframe": _fetch_helper,
+        
+        # متغیرهای محیطی
         "questionnaire_id": questionnaire_id,
         "artifacts_dir": artifacts_dir,
         "RESULTS": {}, 
-        "ARTIFACTS": []   
+        "ARTIFACTS": [],
+        
+        # >>> نکته کلیدی: تزریق مستقیم دیتافریم <<<
+        "df": preloaded_df 
     }
     
-    # پاکسازی وضعیت پلات‌ها
+    # پاکسازی پلات‌های قبلی
     plt.clf()
     plt.close('all')
 
-    # تقسیم کد به سلول‌ها
+    # تقسیم کد به سلول‌ها و اجرا
     cells = code.split('# %%')
-    
     full_output_log = []
     generated_images = []
     has_error = False
 
     for i, cell_code in enumerate(cells):
         cell_code = cell_code.strip()
-        if not cell_code:
-            continue
+        if not cell_code: continue
             
         cell_output = io.StringIO()
         cell_header = f"\n--- [CELL {i+1}] ---\n"
@@ -126,37 +147,30 @@ def execute_generated_code(code: str, db_path: str, artifacts_dir: str, question
         try:
             with contextlib.redirect_stdout(cell_output):
                 with contextlib.redirect_stderr(cell_output):
+                    # اجرای کد در محیطی که df در آن تعریف شده است
                     exec(cell_code, {}, local_scope)
             
             output_str = cell_output.getvalue()
-            if output_str.strip():
-                full_output_log.append(f"{cell_header}{output_str}")
-            else:
-                full_output_log.append(f"{cell_header}(Executed successfully)")
+            full_output_log.append(f"{cell_header}{output_str if output_str.strip() else '(Executed successfully)'}")
 
         except Exception as e:
-            # ثبت خطا ولی ادامه دادن به سلول بعدی
             has_error = True
             error_trace = traceback.format_exc()
             full_output_log.append(f"{cell_header}❌ ERROR:\n{error_trace}")
 
-    # جمع‌آوری تصاویر تولید شده
-    # 1. اسکن پوشه
+    # جمع‌آوری تصاویر
     for file in os.listdir(artifacts_dir):
         if file.lower().endswith(('.png', '.jpg')):
             generated_images.append(os.path.join(artifacts_dir, file))
     
-    # 2. بررسی متغیر ARTIFACTS
     if "ARTIFACTS" in local_scope and isinstance(local_scope["ARTIFACTS"], list):
          for art in local_scope["ARTIFACTS"]:
              if art not in generated_images and os.path.exists(art):
                  generated_images.append(art)
 
-    final_output_text = "\n".join(full_output_log)
-
     return {
-        "success": not has_error, # اگر حتی یک خطا باشد، وضعیت کلی موفق نیست (تا ایجنت بازبین ببیند)
-        "output": final_output_text,
+        "success": not has_error,
+        "output": "\n".join(full_output_log),
         "artifacts": generated_images
     }
 
@@ -168,44 +182,43 @@ if "profile_summary" not in st.session_state: st.session_state.profile_summary =
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("📂 مدیریت داده‌ها")
-    uploaded_file = st.file_uploader("آپلود فایل", type=["csv", "xlsx"])
+    uploaded_file = st.file_uploader("آپلود فایل (Excel/CSV)", type=["csv", "xlsx"])
     
-    if uploaded_file and not st.session_state.current_questionnaire_id:
-        with st.status("در حال پردازش فایل...", expanded=True) as status:
-            try:
-                temp_path = f"temp_{uploaded_file.name}"
-                with open(temp_path, "wb") as f: f.write(uploaded_file.getbuffer())
-                
-                importer = QuestionnaireImporter(settings.db_path, settings.respondent_id_salt)
-                
-                # استفاده از متدهای هوشمند (با فرض اینکه فایل importer.py اصلاح شده است)
-                if uploaded_file.name.endswith('.csv'): 
-                    res = importer.import_csv(temp_path, questionnaire_name=uploaded_file.name, version="v1")
-                else: 
-                    res = importer.import_excel(temp_path, questionnaire_name=uploaded_file.name, version="v1")
-                
-                st.session_state.current_questionnaire_id = res.questionnaire_id
-                
-                # بررسی دیتابیس
-                q_count, r_count = debug_database_schema(settings.db_path, res.questionnaire_id)
-                status.write(f"📊 وضعیت دیتابیس: {q_count} ستون، {r_count} رکورد ذخیره شد.")
-
-                if q_count <= 0:
-                    status.update(label="خطا: هیچ ستونی ذخیره نشد!", state="error")
-                    st.error("مشکل مهم: فایل خوانده شد اما ستون‌ها در دیتابیس ذخیره نشدند.")
-                else:
-                    profiler = SQLiteEAVProfiler(settings.db_path)
-                    profile = profiler.profile(res.questionnaire_id)
-                    st.session_state.profile_summary = profile
-                    status.write("✅ پروفایل داده‌ها ایجاد شد.")
-                    status.update(label="آماده!", state="complete", expanded=False)
-                
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-            except Exception as e:
-                status.update(label="خطا در ایمپورت", state="error")
-                st.error(f"Error details: {str(e)}")
-                st.code(traceback.format_exc())
+    if uploaded_file:
+        if st.session_state.current_questionnaire_id is None:
+            with st.status("در حال پردازش فایل...", expanded=True) as status:
+                try:
+                    temp_path = f"temp_{uploaded_file.name}"
+                    with open(temp_path, "wb") as f: f.write(uploaded_file.getbuffer())
+                    
+                    importer = QuestionnaireImporter(settings.db_path, settings.respondent_id_salt)
+                    
+                    if uploaded_file.name.endswith('.csv'): 
+                        res = importer.import_csv(temp_path, questionnaire_name=uploaded_file.name, version="v1")
+                    else: 
+                        res = importer.import_excel(temp_path, questionnaire_name=uploaded_file.name, version="v1")
+                    
+                    st.session_state.current_questionnaire_id = res.questionnaire_id
+                    
+                    # --- نمایش آمار دیتابیس (درخواست شما) ---
+                    q_count, r_count = debug_database_schema(settings.db_path, res.questionnaire_id)
+                    
+                    if q_count > 0:
+                        status.write(f"✅ **{q_count} ستون** و **{r_count} ردیف** ذخیره شد.")
+                        
+                        profiler = SQLiteEAVProfiler(settings.db_path)
+                        profile = profiler.profile(res.questionnaire_id)
+                        st.session_state.profile_summary = profile
+                        status.update(label="آماده!", state="complete", expanded=False)
+                    else:
+                        status.update(label="خطا در ذخیره!", state="error")
+                        st.error(f"دیتابیس خالی است! (ستون: {q_count}، ردیف: {r_count})")
+                    
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except Exception as e:
+                    status.update(label="خطا", state="error")
+                    st.error(f"Error: {str(e)}")
 
     if st.session_state.profile_summary:
         st.divider()
@@ -213,11 +226,9 @@ with st.sidebar:
         if is_dataclass(summary): summary = asdict(summary)
         
         q_list = summary.get('questions', [])
-        st.info(f"تعداد رکوردها: {summary.get('n_total_responses', 0)}")
+        st.info(f"📊 رکوردها: {summary.get('n_total_responses', 0)}")
         
-        if not q_list:
-            st.warning("⚠️ لیست ستون‌ها خالی است!")
-        else:
+        if q_list:
             cols = [q['column_name'] for q in q_list]
             st.text(f"ستون‌ها ({len(cols)}):")
             st.code("\n".join(cols[:10]) + ("..." if len(cols)>10 else ""), language="text")
@@ -231,14 +242,30 @@ st.title("🤖 دستیار تحلیلگر داده")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if "artifacts" in msg and msg["artifacts"]:
-            cols = st.columns(min(len(msg["artifacts"]), 3))
-            for idx, img in enumerate(msg["artifacts"]):
-                cols[idx % 3].image(img)
-        if "code" in msg and msg["code"]:
-             with st.expander("کد اجرا شده"):
-                 st.code(msg["code"], language="python")
+        if msg["role"] == "user":
+            st.markdown(msg["content"])
+        else:
+            tab1, tab2, tab3 = st.tabs(["📝 گزارش", "📊 نمودارها", "💻 کد و لاگ"])
+            
+            with tab1:
+                st.markdown(msg["content"])
+            
+            with tab2:
+                if msg.get("artifacts"):
+                    cols = st.columns(min(len(msg["artifacts"]), 2))
+                    for idx, img in enumerate(msg["artifacts"]):
+                        cols[idx % 2].image(img, use_column_width=True)
+                else:
+                    st.info("نموداری تولید نشده است.")
+            
+            with tab3:
+                if msg.get("code"):
+                    st.markdown("**کد تولید شده:**")
+                    st.code(msg["code"], language="python")
+                
+                if msg.get("log"):
+                    st.markdown("**خروجی اجرا:**")
+                    st.code(msg["log"], language="text")
 
 if prompt := st.chat_input("سوال تحلیلی خود را بپرسید..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -248,9 +275,12 @@ if prompt := st.chat_input("سوال تحلیلی خود را بپرسید..."):
         st.error("لطفاً ابتدا فایل آپلود کنید.")
     else:
         with st.chat_message("assistant"):
-            status_container = st.status("🤖 شروع تحلیل...", expanded=True)
+            status_box = st.status("🤖 شروع تحلیل...", expanded=True)
+            
+            final_msg = ""
             final_artifacts = []
             final_code = ""
+            final_log = ""
             
             try:
                 # 1. بازیابی پروفایل
@@ -261,14 +291,9 @@ if prompt := st.chat_input("سوال تحلیلی خود را بپرسید..."):
                     st.session_state.profile_summary = profile_data
 
                 if is_dataclass(profile_data): profile_data = asdict(profile_data)
-                
                 questions_list = profile_data.get('questions', [])
-                if not questions_list:
-                    status_container.update(label="خطای داده", state="error")
-                    st.error("⛔ خطا: اسکیمای داده خالی است.")
-                    st.stop()
 
-                # 2. ایجاد وضعیت اولیه (State)
+                # 2. State
                 state = WorkflowState(
                     run_id=f"run_{uuid4().hex[:8]}",
                     questionnaire_id=st.session_state.current_questionnaire_id,
@@ -277,107 +302,132 @@ if prompt := st.chat_input("سوال تحلیلی خود را بپرسید..."):
                     data_profile=profile_data
                 )
 
-                # 3. Router Agent
-                status_container.write("🔍 بررسی ارتباط سوال و ستون‌ها...")
+                # 3. Router
+                status_box.write("🔍 تحلیل سوال و مسیریابی...")
                 router = RouterMapperAgent(model=settings.router_model, db_path=settings.db_path)
                 state = router.run(state)
                 
                 if not state.is_related:
-                    reason = state.notes.get('router_reason', 'نامشخص')
-                    final_msg = f"⛔ سوال نامرتبط تشخیص داده شد.\n**دلیل:** {reason}"
-                    status_container.update(label="توقف", state="error")
+                    final_msg = f"⛔ سوال نامرتبط است: {state.notes.get('router_reason')}"
+                    status_box.update(label="توقف", state="error")
                 else:
-                    # 4. Planner Agent
-                    status_container.write("📝 تدوین برنامه تحلیل...")
+                    # 4. Planner
+                    status_box.write("📝 برنامه‌ریزی تحلیل...")
                     planner = PlannerAgent(model=settings.planner_model)
                     state = planner.run(state)
                     
-                    # 5. Coding Loop
-                    coder = CodeWriterAgent(model=settings.code_writer_model)
+                    # --- فاز ۱: تحلیل عددی (Analysis) ---
+                    # در اینجا mode='analysis' را پاس می‌دهیم تا ارور رفع شود
+                    analyst = CodeWriterAgent(model=settings.code_writer_model, mode="analysis")
                     reviewer = CodeReviewerAgent(model=settings.code_reviewer_model)
                     quality = QualityReviewAgent(model=settings.quality_review_model)
                     
+                    analysis_success = False
+                    
                     for i in range(settings.max_code_iterations):
-                        status_container.write(f"💻 کدنویسی و اجرا (تلاش {i+1})...")
-                        state = coder.run(state)
+                        status_box.write(f"🧮 محاسبات عددی (تلاش {i+1})...")
+                        state = analyst.run(state)
                         state = reviewer.run(state)
                         
-                        # نمایش کد
-                        with status_container:
-                            with st.expander(f"مشاهده کد تولید شده (نسخه {i+1})", expanded=False):
+                        with status_box:
+                            with st.expander(f"Analysis Code {i+1}", expanded=False):
                                 st.code(state.code_draft, language="python")
-                                if state.code_review.get("feedback"):
-                                    st.caption(f"بازخورد: {state.code_review['feedback'][:200]}...")
 
                         if not state.code_review.get("approved"):
-                            status_container.write("⚠️ کد تایید نشد، اصلاح مجدد...")
+                            status_box.write(f"⚠️ اصلاح کد تحلیل: {state.code_review.get('feedback')[:50]}...")
                             continue
 
-                        # Execution (Jupyter Style)
-                        status_container.write("⚙️ اجرای سلول‌به‌سلول...")
                         exec_res = execute_generated_code(
-                            state.code_draft, 
-                            settings.db_path, 
-                            settings.artifacts_dir, 
-                            state.questionnaire_id # تزریق ID مهم است
+                            state.code_draft, settings.db_path, settings.artifacts_dir, state.questionnaire_id
                         )
                         state.execution = exec_res
+                        state.analysis_output = exec_res["output"] # ذخیره خروجی تحلیل
 
-                        # نمایش خروجی‌ها
-                        with status_container:
-                            with st.expander("لاگ اجرای کد (خروجی و خطاها)", expanded=True):
+                        with status_box:
+                            with st.expander(f"Analysis Log {i+1}", expanded=False):
                                 st.text(exec_res["output"])
-                            
-                            if exec_res["artifacts"]:
-                                st.write("📷 نمودارهای موقت:")
-                                img_cols = st.columns(min(len(exec_res["artifacts"]), 3))
-                                for idx, img in enumerate(exec_res["artifacts"]):
-                                    img_cols[idx % 3].image(img)
 
-                        if not exec_res["success"]:
-                             status_container.write("❌ اجرا دارای خطا بود (اما ادامه می‌دهیم).")
-                             # اینجا continue نمیزنیم تا شانس بررسی کیفیت داده شود
-                             # مگر اینکه خروجی کلا خالی باشد
-                             if not exec_res["output"] and not exec_res["artifacts"]:
-                                 continue
-
-                        # Quality Review
-                        status_container.write("🧐 بررسی کیفیت نتایج...")
-                        state = quality.run(state)
-                        if state.quality_review.get("approved"):
-                            final_artifacts = exec_res["artifacts"]
-                            final_code = state.code_draft
+                        if exec_res["success"]:
+                            analysis_success = True
+                            final_code += f"\n# --- ANALYSIS ---\n{state.code_draft}\n"
+                            final_log += f"\n--- ANALYSIS LOG ---\n{exec_res['output']}\n"
                             break
                         else:
-                             status_container.write(f"⚠️ کیفیت پایین: {state.quality_review.get('feedback', '')}")
+                            status_box.write("⚠️ خطا در اجرای محاسبات...")
+                            state.execution = {"error_trace": exec_res["output"]} # انتقال خطا برای اصلاح
+
+                    if not analysis_success:
+                        raise RuntimeError("تحلیل عددی با شکست مواجه شد.")
+
+                    # --- فاز ۲: ترسیم نمودار (Visualization) ---
+                    # پاک کردن وضعیت خطاها برای فاز جدید
+                    state.execution = {}
                     
-                    # 6. Report Agent
-                    status_container.write("✍️ نگارش گزارش نهایی...")
+                    # در اینجا mode='visualization' را پاس می‌دهیم
+                    visualizer = CodeWriterAgent(model=settings.code_writer_model, mode="visualization")
+                    
+                    viz_success = False
+                    for i in range(settings.max_code_iterations):
+                        status_box.write(f"🎨 ترسیم نمودار (تلاش {i+1})...")
+                        state = visualizer.run(state)
+                        
+                        with status_box:
+                            with st.expander(f"Viz Code {i+1}", expanded=False):
+                                st.code(state.viz_code, language="python")
+
+                        exec_res = execute_generated_code(
+                            state.viz_code, settings.db_path, settings.artifacts_dir, state.questionnaire_id
+                        )
+                        state.viz_artifacts = exec_res["artifacts"]
+
+                        if exec_res["success"]:
+                            viz_success = True
+                            final_artifacts = exec_res["artifacts"]
+                            final_code += f"\n# --- VISUALIZATION ---\n{state.viz_code}\n"
+                            break
+                        else:
+                             status_box.write("⚠️ خطا در رسم نمودار...")
+                             state.execution = {"error_trace": exec_res["output"]}
+
+                    # 6. Report
+                    status_box.write("✍️ تنظیم گزارش نهایی...")
                     reporter = ReportWriterAgent(model=settings.report_writer_model)
                     state = reporter.run(state)
                     
                     final_msg = state.final_report
-                    status_container.update(label="تحلیل تکمیل شد!", state="complete")
+                    status_box.update(label="تمام شد!", state="complete", expanded=False)
 
-                # نمایش نهایی
-                st.markdown(final_msg)
-                
-                if final_artifacts:
-                    st.divider()
-                    st.subheader("📊 نمودارها و خروجی‌ها")
-                    cols = st.columns(min(len(final_artifacts), 2))
-                    for idx, img in enumerate(final_artifacts):
-                        cols[idx % 2].image(img, use_column_width=True)
+                    # --- نمایش نهایی ---
+                    tab1, tab2, tab3 = st.tabs(["📝 گزارش", "📊 نمودارها", "💻 کد و لاگ"])
+                    
+                    with tab1:
+                        st.markdown(final_msg)
+                    
+                    with tab2:
+                        if final_artifacts:
+                            cols = st.columns(min(len(final_artifacts), 2))
+                            for idx, img in enumerate(final_artifacts):
+                                cols[idx % 2].image(img, caption=f"Chart {idx+1}", use_column_width=True)
+                        else:
+                            st.info("هیچ نموداری تولید نشد.")
 
-                # ذخیره در تاریخچه
-                st.session_state.messages.append({
-                    "role": "assistant", 
-                    "content": final_msg, 
-                    "artifacts": final_artifacts,
-                    "code": final_code
-                })
+                    with tab3:
+                        st.markdown("### کدهای اجرا شده")
+                        st.code(final_code, language="python")
+                        st.divider()
+                        st.markdown("### لاگ کامل")
+                        st.code(final_log, language="text")
+
+                    # ذخیره در سشن
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": final_msg, 
+                        "artifacts": final_artifacts,
+                        "code": final_code,
+                        "log": final_log
+                    })
 
             except Exception as e:
-                status_container.update(label="خطای سیستمی", state="error")
+                status_box.update(label="خطای سیستمی", state="error")
                 st.error(f"Error: {str(e)}")
                 st.code(traceback.format_exc())

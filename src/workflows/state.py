@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, TypedDict, Literal, Union
 # -------------------------
 # 1. Type Definitions (Complex Objects)
 # -------------------------
-# این کلاس‌ها ساختار دیکشنری‌های داخلی را برای ایجنت‌ها شفاف می‌کنند.
 
 Confidence = Literal["low", "medium", "high"]
 
@@ -23,7 +22,6 @@ class MappedColumn(TypedDict, total=False):
     inferred_role: str
     value_constraints: Dict[str, Any]
     privacy_level: str
-    # فیلدهای اضافی احتمالی
     original_header: str
 
 class CodeReview(TypedDict, total=False):
@@ -34,15 +32,21 @@ class CodeReview(TypedDict, total=False):
     score: float
 
 class ExecutionResult(TypedDict, total=False):
-    success: bool      # وضعیت کلی اجرا
-    status: str        # error / success
+    """
+    متادیتای نتیجه اجرا.
+    توجه: داده‌های سنگین مثل DataFrame اینجا ذخیره نمی‌شوند.
+    فقط وضعیت موفقیت، لاگ متنی و مسیر فایل‌ها ذخیره می‌شود.
+    """
+    success: bool
+    status: str
     stdout: str
     stderr: str
-    results_json: Dict[str, Any]
-    artifacts: List[str] # لیست مسیر فایل‌های تولید شده (تصاویر و ...)
+    results_json: Dict[str, Any] # فقط آمارهای خلاصه (Summary Stats)
+    artifacts: List[str]         # مسیر فایل‌های تولید شده
     started_at: str
     finished_at: str
     runtime_seconds: float
+    error_trace: Optional[str]
 
 class QualityReview(TypedDict, total=False):
     approved: bool
@@ -61,17 +65,18 @@ ProfileSummary = Dict[str, Any]
 class WorkflowState:
     """
     وضعیت مرکزی که بین تمام ایجنت‌ها دست‌به‌دست می‌شود.
-    شامل شناسه اجرا، سوال کاربر، وضعیت دیتابیس و خروجی مراحل مختلف است.
+    نکته مهم: این آبجکت فقط حاوی متادیتا و متون است.
+    داده‌های حجیم (DataFrame) در 'Kernel' نگهداری می‌شوند و اینجا نمی‌آیند.
     """
     
     # --- Core Identity ---
     run_id: str
     user_question: str
-    questionnaire_id: Optional[str] = None  # شناسه فایل/پرسشنامه در دیتابیس
+    questionnaire_id: Optional[str] = None
     
     # --- Metadata & Context ---
-    schema_summary: List[str] = field(default_factory=list) # لیست نام ستون‌ها
-    data_profile: Dict[str, Any] = field(default_factory=dict) # خلاصه آماری داده‌ها
+    schema_summary: List[str] = field(default_factory=list)
+    data_profile: Dict[str, Any] = field(default_factory=dict)
     
     # --- Router / Mapper Stage ---
     is_related: Optional[bool] = None
@@ -79,10 +84,23 @@ class WorkflowState:
     
     # --- Planning Stage ---
     analysis_plan: Dict[str, Any] = field(default_factory=dict)
-    stats_params: Dict[str, Any] = field(default_factory=dict) # پارامترهای آماری استخراج شده
+    stats_params: Dict[str, Any] = field(default_factory=dict)
 
-    # --- Coding & Execution Stage ---
-    code_draft: str = ""
+    # --- Execution Architecture (Split Phases) ---
+    
+    # Phase 1: Analysis (محاسبات عددی و آماری)
+    # این کد فقط خروجی متنی (print) تولید می‌کند که خوراک ایجنت‌های بعدی است.
+    analysis_code: str = ""
+    analysis_output: str = "" 
+    
+    # Phase 2: Visualization (رسم نمودار)
+    # این کد با فرض وجود داده‌ها در حافظه کرنل، فقط نمودار تولید می‌کند.
+    viz_code: str = ""
+    viz_artifacts: List[str] = field(default_factory=list) # لیست مسیر فایل‌های عکس
+
+    # Legacy / Working Memory Fields
+    # (فیلدهای موقت برای استفاده در حین تلاش‌های کدنویسی)
+    code_draft: str = "" 
     code_review: CodeReview = field(default_factory=dict)
     execution: ExecutionResult = field(default_factory=dict)
 
@@ -90,12 +108,11 @@ class WorkflowState:
     quality_review: QualityReview = field(default_factory=dict)
     final_report: str = ""
 
-    # --- Shared Memory / Notes ---
-    # ایجنت‌ها می‌توانند یادداشت‌های موقت یا استدلال‌های خود را اینجا بنویسند
+    # --- Shared Notes ---
     notes: Dict[str, Any] = field(default_factory=dict)
 
     # --- Bookkeeping ---
-    iteration: Dict[str, int] = field(default_factory=lambda: {"code": 0, "quality": 0})
+    iteration: Dict[str, int] = field(default_factory=lambda: {"analysis": 0, "viz": 0, "quality": 0})
     created_at: str = field(default_factory=lambda: datetime.utcnow().replace(microsecond=0).isoformat() + "Z")
     updated_at: str = field(default_factory=lambda: datetime.utcnow().replace(microsecond=0).isoformat() + "Z")
 
@@ -104,22 +121,15 @@ class WorkflowState:
     # -------------------------
 
     def patch(self, **changes) -> "WorkflowState":
-        """
-        یک کپی جدید از استیت با مقادیر تغییر یافته برمی‌گرداند (Immutable Update).
-        استفاده: new_state = state.patch(is_related=True, notes={...})
-        """
-        # اگر دیکشنری‌های تو در تو مثل notes را آپدیت می‌کنیم، بهتر است کپی بگیریم
-        # اما برای سادگی و سرعت، از replace استاندارد استفاده می‌کنیم.
-        # ایجنت‌ها باید دقت کنند که دیکشنری‌های Mutable را تغییر ندهند مگر اینکه قصدشان این باشد.
+        """Immutable update."""
         updated = replace(self, **changes)
         updated.touch()
         return updated
 
     def touch(self) -> None:
-        """زمان به‌روزرسانی را آپدیت می‌کند."""
         self.updated_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
-    # --- Dictionary Compatibility (برای سازگاری با کدهای قدیمی یا LangGraph ساده) ---
+    # --- Dictionary Compatibility ---
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
 
@@ -146,7 +156,6 @@ class WorkflowState:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "WorkflowState":
-        # فیلتر کردن کلیدهای اضافی که در کلاس تعریف نشده‌اند (برای جلوگیری از خطای init)
         valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered_data = {k: v for k, v in data.items() if k in valid_fields}
         return cls(**filtered_data)
@@ -161,18 +170,14 @@ class WorkflowState:
 # -------------------------
 
 def _json_sanitize(obj: Any) -> Any:
-    """تبدیل اشیاء به فرمت قابل سریالایز JSON به صورت بازگشتی."""
-    if obj is None:
-        return None
-    if isinstance(obj, (str, int, float, bool)):
+    if obj is None: return None
+    if isinstance(obj, (str, int, float, bool)): return obj
+    if isinstance(obj, datetime): return obj.isoformat()
+    if is_dataclass(obj): return _json_sanitize(asdict(obj))
+    if isinstance(obj, dict): return {str(k): _json_sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)): return [_json_sanitize(v) for v in obj]
+    try:
+        json.dumps(obj)
         return obj
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    if is_dataclass(obj):
-        return _json_sanitize(asdict(obj))
-    if isinstance(obj, dict):
-        return {str(k): _json_sanitize(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple, set)):
-        return [_json_sanitize(v) for v in obj]
-    # Fallback for unknown objects
-    return str(obj)
+    except (TypeError, ValueError):
+        return str(obj)

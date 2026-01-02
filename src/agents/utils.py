@@ -146,3 +146,22 @@ def validate_with_jsonschema(payload: Dict[str, Any], schema: Optional[Dict[str,
         jsonschema.validate(instance=payload, schema=schema)
     except Exception as e:
         raise AgentOutputValidationError(str(e)) from e
+def extract_python_code(text: str) -> str:
+    """
+    استخراج کد پایتون از بین تگ‌های مارک‌داون
+    """
+    # الگوی پیدا کردن متن بین ```python و ```
+    pattern = r"```python(.*?)```"
+    match = re.search(pattern, text, re.DOTALL)
+    
+    if match:
+        # اگر تگ پیدا شد، محتوای داخلش را برگردان
+        return match.group(1).strip()
+    elif "```" in text:
+        # اگر تگ python نداشت اما تگ کد داشت
+        pattern = r"```(.*?)```"
+        match = re.search(pattern, text, re.DOTALL)
+        return match.group(1).strip() if match else text
+    else:
+        # اگر هیچ تگی نبود، کل متن را به عنوان کد برگردان (ریسک دارد اما لازم است)
+        return text.strip()

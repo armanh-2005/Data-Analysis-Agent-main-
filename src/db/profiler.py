@@ -25,6 +25,7 @@ class QuestionProfile:
     unique_count: Optional[int] = None
     top_values: Optional[List[Dict[str, Any]]] = None
     numeric: Optional[Dict[str, Any]] = None
+    sample_values: Optional[List[Any]] = None
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ class SQLiteEAVProfiler:
     def profile(
         self,
         questionnaire_id: str,
-        column_names: Optional[Sequence[str]] = None,
+        column_names: Optional[Sequence[str]] = None, # وقتی column_mapper اجرا میشه، لیست ستون‌ها اینجا میاد
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
         sample_size: Optional[int] = None,
@@ -56,9 +57,13 @@ class SQLiteEAVProfiler:
         include_sensitive_top_values: bool = False,
     ) -> Dict[str, Any]:
         
-        # 1. Load Schema
+        # 1. Load Schema (اینجا خودش فیلتر میشه روی column_names)
         schema = self._load_schema(questionnaire_id, column_names=column_names)
         if not schema:
+            # اگر هیچ ستونی انتخاب نشده باشه یا آیدی غلط باشه
+            if column_names: 
+                # ممکنه column_mapper چیزی انتخاب کرده که تو دیتابیس نیست، پس ارور نمیدیم، دیکشنری خالی میدیم
+                return self._create_empty_profile(questionnaire_id, [], date_from, date_to, sample_size)
             raise ProfilerError(f"No schema found for questionnaire_id: {questionnaire_id}")
 
         # 2. Select Response IDs
@@ -118,17 +123,29 @@ class SQLiteEAVProfiler:
             unique_count: Optional[int] = None
             top_values: Optional[List[Dict[str, Any]]] = None
             numeric: Optional[Dict[str, Any]] = None
+            sample_values: Optional[List[Any]] = None # متغیر جدید
 
             if qtype in {"numeric", "integer", "float"}:
                 numeric = self._numeric_summary(typed_values)
                 unique_count = numeric.get("unique_count") if numeric else 0
 
             elif qtype in {"likert", "categorical", "text", "boolean"}:
+                # محاسبه آمار برای نمودارها
                 unique_count, top_values = self._top_values_summary(
                     typed_values=typed_values,
                     top_k=top_k,
                     suppress_top=(privacy_level == "sensitive" and not include_sensitive_top_values),
                 )
+                
+                # --- بخش جدید: استخراج مقادیر نمونه برای ایجنت ---
+                # فقط لیستی از استرینگ‌های یونیک (بدون تعداد) تا ایجنت بفهمه چی توشه
+                if typed_values:
+                    # تبدیل همه به استرینگ و حذف تکراری‌ها
+                    svals = list(set(str(v) for v in typed_values if v is not None))
+                    # مرتب‌سازی و برداشتن 20 تای اول (برای جلوگیری از شلوغی بیش از حد)
+                    sample_values = sorted(svals)[:20]
+                else:
+                    sample_values = []
 
             elif qtype in {"date", "datetime"}:
                 svals = [str(v) for v in typed_values]
@@ -158,6 +175,7 @@ class SQLiteEAVProfiler:
                 unique_count=unique_count,
                 top_values=top_values,
                 numeric=numeric,
+                sample_values=sample_values, # ارسال به دیتاکلاس
             )
             question_profiles.append(qp)
 
