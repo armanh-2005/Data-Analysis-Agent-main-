@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Dict, Any, List
 from dotenv import load_dotenv
 
-# --- تنظیمات جلوگیری از کرش ---
+st.set_page_config(page_title="دستیار تحلیل داده", page_icon="📊", layout="wide")
+
+# --- settings---
 matplotlib.use('Agg')
 warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 
@@ -43,7 +45,6 @@ except ImportError as e:
     st.stop()
 
 # --- تنظیمات اولیه ---
-st.set_page_config(page_title="دستیار تحلیل داده", page_icon="📊", layout="wide")
 st.markdown("""
 <style>
     .stTextInput, .stMarkdown, .stButton { direction: rtl; text-align: right; }
@@ -58,10 +59,26 @@ def get_settings():
     return Settings.from_env()
 
 settings = get_settings()
+
+# 1. Ensure DB Directory Exists
 os.makedirs(os.path.dirname(settings.db_path), exist_ok=True)
 if hasattr(settings, 'artifacts_dir'):
     os.makedirs(settings.artifacts_dir, exist_ok=True)
 
+# ---------------- ADD THIS BLOCK ----------------
+# 2. Ensure DB Tables Exist (Fix for "no such table" error)
+try:
+    schema_path = root_dir / "src" / "db" / "schema.sql"
+    if schema_path.exists():
+        # Initialize repository and run schema
+        repo = SQLiteRepository(settings.db_path)
+        repo.init_schema_from_sql_file(str(schema_path))
+        # Optional: Print to console to confirm it ran
+        print("✅ Database schema initialized successfully.")
+    else:
+        st.error(f"❌ Critical Error: Schema file not found at {schema_path}")
+except Exception as e:
+    st.error(f"❌ Failed to initialize database: {e}")
 # --- تابع بررسی دیتابیس (کانتر ستون و ردیف) ---
 def debug_database_schema(db_path, q_id):
     """بررسی می‌کند آیا واقعاً ستون‌ها در دیتابیس ذخیره شده‌اند؟"""
@@ -77,17 +94,31 @@ def debug_database_schema(db_path, q_id):
         return 0, 0
 
 # --- Executor (با تزریق دیتافریم) ---
-def execute_generated_code(code: str, db_path: str, artifacts_dir: str, questionnaire_id: str = None) -> Dict[str, Any]:
+def execute_generated_code(code: str, db_path: str, artifacts_dir: str, questionnaire_id: str = None, column_names: List[str] = None) -> Dict[str, Any]:
     if not os.path.exists(artifacts_dir):
         os.makedirs(artifacts_dir)
 
     # 1. تابع کمکی برای دریافت دیتا از دیتابیس
+    # 1. Helper function to fetch data (Now uses passed column_names)
     def _fetch_helper(qid=None):
         target_id = qid or questionnaire_id
         if not target_id:
             raise ValueError("Questionnaire ID not found in environment.")
+        
+        # Validation: Check if we have columns
+        if not column_names:
+            print("CRITICAL WARNING: No 'column_names' provided to execution engine.")
+            return pd.DataFrame()
+
         repo = SQLiteRepository(db_path)
-        return repo.fetch_wide_dataframe(target_id)
+        # Pass the columns from state to the repository
+        return repo.fetch_wide_dataframe(target_id, column_names)
+    
+    # Clean old artifacts to prevent ghost images
+    for f in os.listdir(artifacts_dir):
+        file_path = os.path.join(artifacts_dir, f)
+        if os.path.isfile(file_path) and f.lower().endswith(('.png', '.jpg')):
+            os.remove(file_path)
 
     # 2. لود کردن دیتافریم (Pre-loading)
     # این کار باعث می‌شود df همیشه وجود داشته باشد
@@ -95,8 +126,9 @@ def execute_generated_code(code: str, db_path: str, artifacts_dir: str, question
         preloaded_df = _fetch_helper(questionnaire_id)
         # print(f"DEBUG: Dataframe loaded successfully with shape: {preloaded_df.shape}")
     except Exception as e:
-        # print(f"DEBUG: Failed to preload dataframe: {e}")
-        preloaded_df = pd.DataFrame() 
+            # Show the error in the output log so you can see it!
+            print(f"CRITICAL ERROR: Failed to load data from DB. Reason: {e}") 
+            preloaded_df = pd.DataFrame() 
 
     # 3. ساخت محیط اجرا (Local Scope)
     local_scope = {
@@ -182,6 +214,9 @@ with st.sidebar:
                         res = importer.import_excel(temp_path, questionnaire_name=uploaded_file.name, version="v1")
                     
                     st.session_state.current_questionnaire_id = res.questionnaire_id
+
+                    repo = SQLiteRepository(settings.db_path)
+                    st.session_state.active_df = repo.fetch_wide_dataframe(res.questionnaire_id)
                     
                     q_count, r_count = debug_database_schema(settings.db_path, res.questionnaire_id)
                     
@@ -309,7 +344,11 @@ if prompt := st.chat_input("سوال تحلیلی خود را بپرسید..."):
 
                         # 2. اجرا
                         exec_res = execute_generated_code(
-                            state.code_draft, settings.db_path, settings.artifacts_dir, state.questionnaire_id
+                            state.code_draft,
+                            settings.db_path,
+                            settings.artifacts_dir,
+                            state.questionnaire_id,
+                            state.schema_summary
                         )
                         
                         with status_box:
@@ -349,7 +388,7 @@ if prompt := st.chat_input("سوال تحلیلی خود را بپرسید..."):
                                 st.code(state.viz_code, language="python")
 
                         exec_res = execute_generated_code(
-                            state.viz_code, settings.db_path, settings.artifacts_dir, state.questionnaire_id
+                            state.viz_code, settings.db_path, settings.artifacts_dir, state.questionnaire_id,column_names=state.schema_summary 
                         )
                         state.viz_artifacts = exec_res["artifacts"]
 
